@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  # 이더리움 로그 수집기 (Go)
+  indexer:
+    build: ./go-indexer
+    volumes:
+      - ./go-indexer:/app
+    environment:
+      - ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+      - DB_URL=postgres://user:pass@db:5432/eth_db
+    depends_on:
+      - db
+
+  # 데이터 조회 API (Node.js)
+  api:
+    build: ./node-api
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./node-api:/app
+    depends_on:
+      - db
+
+  # 데이터 저장소 (PostgreSQL)
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: eth_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
