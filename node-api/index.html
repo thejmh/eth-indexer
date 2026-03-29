@@ -22,6 +22,17 @@
         .live-indicator {
             animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
         }
+
+        /* [이론: CSS 애니메이션] 부드러운 회전 효과 정의 */
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .animate-spin {
+            animation: spin 1s linear infinite;
+        }
     </style>
 </head>
 
@@ -62,7 +73,7 @@
                             <th class="p-4 text-right">Value (ETH)</th>
                         </tr>
                     </thead>
-                    <tbody id="tx-table-body" class="divide-y divide-gray-700 text-sm font-mono">
+                    <tbody id="transactionBody" class="divide-y divide-gray-700 text-sm font-mono">
                     </tbody>
                 </table>
             </div>
@@ -76,6 +87,30 @@
         const shortAddr = (addr) => addr && addr.length > 10
             ? `${addr.substring(0, 6)}...${addr.substring(addr.length - 4)}`
             : addr;
+
+        // 1 ETH = 10^18 Wei 변환 함수
+        const formatEth = (weiValue) => {
+            // 1. 값이 없거나 undefined인 경우 방어 코드
+            if (weiValue === undefined || weiValue === null || weiValue === "") return "0 ETH";
+
+            try {
+                // 2. BigInt를 사용하여 정밀도 유지 (문자열 그대로 처리)
+                const wei = BigInt(weiValue);
+
+                // 3. ETH 단위로 변환 (10^18)
+                // BigInt는 소수점 계산이 안 되므로, 문자열 조작이나 소수점 변환 기법 사용
+                const eth = Number(wei) / 1e18;
+
+                // 4. 숫자가 너무 작아 지수 표기법(e-7 등)이 되는 것 방지
+                return eth.toLocaleString(undefined, {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 6
+                }) + " ETH";
+            } catch (e) {
+                console.error("Value 변환 에러:", e, "원본값:", weiValue);
+                return "Error";
+            }
+        };
         let timer;
 
         /**
@@ -83,7 +118,7 @@
          * @param {Array} transactions - 백엔드에서 받은 트랜잭션 배열
          */
         function renderTable(transactions) {
-            const tableBody = document.getElementById('tx-table-body'); // tbody ID 가정
+            const tableBody = document.getElementById('transactionBody'); // tbody ID 가정
             tableBody.innerHTML = ''; // 기존 데이터 초기화
 
             // 1. [이론: 예외 처리] 데이터가 없을 경우 처리
@@ -150,37 +185,19 @@
         function clearSearch() {
             document.getElementById('searchInput').value = "";
             fetchTransactions();
+            if (timer) clearInterval(timer); // 검색 시 자동 갱신 중지
             timer = setInterval(fetchTransactions, 10000);
         }
 
-        // 1 ETH = 10^18 Wei 변환 함수
-        const formatEth = (weiValue) => {
-            // 1. 값이 없거나 undefined인 경우 방어 코드
-            if (weiValue === undefined || weiValue === null || weiValue === "") return "0 ETH";
-
-            try {
-                // 2. BigInt를 사용하여 정밀도 유지 (문자열 그대로 처리)
-                const wei = BigInt(weiValue);
-
-                // 3. ETH 단위로 변환 (10^18)
-                // BigInt는 소수점 계산이 안 되므로, 문자열 조작이나 소수점 변환 기법 사용
-                const eth = Number(wei) / 1e18;
-
-                // 4. 숫자가 너무 작아 지수 표기법(e-7 등)이 되는 것 방지
-                return eth.toLocaleString(undefined, {
-                    minimumFractionDigits: 0,
-                    maximumFractionDigits: 6
-                }) + " ETH";
-            } catch (e) {
-                console.error("Value 변환 에러:", e, "원본값:", weiValue);
-                return "Error";
-            }
-        };
         /**
          * [이론: 통합 함수 설계] 
          * query 인자가 없으면 기본값 ""을 사용함 (JS식 오버로딩 구현)
          */
         async function fetchTransactions(query = "") {
+            const tableBody = document.getElementById('transactionBody');
+
+            // 1. [이론: 로딩 시작] 요청 전 스피너 표시
+            tableBody.innerHTML = getLoadingSpinner();
             try {
                 console.log("🔍 요청 쿼리:", query); // 디버깅용
 
@@ -201,6 +218,22 @@
                 const tableBody = document.getElementById('transactionBody');
                 tableBody.innerHTML = `<tr><td colspan="5" class="text-center p-4 text-red-500">데이터를 가져오는데 실패했습니다.</td></tr>`;
             }
+        }
+
+        /**
+         * [이론: 로딩 상태 UI] 로딩 중임을 시각적으로 표시하는 HTML 반환
+         */
+        function getLoadingSpinner() {
+            return `
+                <tr>
+                    <td colspan="5" class="p-20 text-center">
+                        <div class="flex flex-col items-center justify-center gap-4">
+                            <div class="w-12 h-12 border-4 border-gray-600 border-t-blue-500 rounded-full animate-spin"></div>
+                            <p class="text-gray-400 text-sm font-medium">이더리움 데이터를 가져오는 중...</p>
+                        </div>
+                    </td>
+                </tr>
+            `;
         }
         // 10초마다 데이터 갱신
         fetchTransactions();
