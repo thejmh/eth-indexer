@@ -1,15 +1,30 @@
 <!DOCTYPE html>
 <html lang="ko">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Eth Mini Indexer Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-        .live-indicator { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .live-indicator {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
     </style>
 </head>
+
 <body class="bg-gray-900 text-gray-100 min-h-screen p-8">
     <div class="max-w-6xl mx-auto">
         <div class="flex justify-between items-center mb-8">
@@ -33,10 +48,11 @@
                             <th class="p-4">From</th>
                             <th class="p-4">To</th>
                             <th class="p-4 text-right">Value (Wei)</th>
+                            <th class="p-4 text-right">Value (ETH)</th>
                         </tr>
                     </thead>
                     <tbody id="tx-table-body" class="divide-y divide-gray-700 text-sm font-mono">
-                        </tbody>
+                    </tbody>
                 </table>
             </div>
         </div>
@@ -46,16 +62,40 @@
         // 주소 축약 함수 (예: 0x1234...abcd)
         const shortAddr = (addr) => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : 'Contract Creation';
 
+        // 1 ETH = 10^18 Wei 변환 함수
+        const formatEth = (weiValue) => {
+            // 1. 값이 없거나 undefined인 경우 방어 코드
+            if (weiValue === undefined || weiValue === null || weiValue === "") return "0 ETH";
+
+            try {
+                // 2. BigInt를 사용하여 정밀도 유지 (문자열 그대로 처리)
+                const wei = BigInt(weiValue);
+
+                // 3. ETH 단위로 변환 (10^18)
+                // BigInt는 소수점 계산이 안 되므로, 문자열 조작이나 소수점 변환 기법 사용
+                const eth = Number(wei) / 1e18;
+
+                // 4. 숫자가 너무 작아 지수 표기법(e-7 등)이 되는 것 방지
+                return eth.toLocaleString(undefined, {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 6
+                }) + " ETH";
+            } catch (e) {
+                console.error("Value 변환 에러:", e, "원본값:", weiValue);
+                return "Error";
+            }
+        };
+
         async function fetchTransactions() {
             try {
                 const response = await fetch('http://localhost:8080/api/transactions');
                 const data = await response.json();
-                
+
                 const tableBody = document.getElementById('tx-table-body');
                 const status = document.getElementById('status');
-                
+
                 status.innerText = `Last Sync: ${new Date().toLocaleTimeString()}`;
-                
+
                 // 테이블 초기화 후 렌더링
                 tableBody.innerHTML = '';
                 data.forEach(tx => {
@@ -65,7 +105,8 @@
                             <td class="p-4 text-gray-400" title="${tx.hash}">${shortAddr(tx.hash)}</td>
                             <td class="p-4 text-orange-300">${shortAddr(tx.from_address)}</td>
                             <td class="p-4 text-green-300">${shortAddr(tx.to_address)}</td>
-                            <td class="p-4 text-right font-bold text-white">${Number(tx.value).toLocaleString()}</td>
+                            <td class="p-4 text-right font-bold text-white">${formatEth(tx.value)}</td>
+                            <td class="p-4 text-right font-bold text-white">${tx.eth_value.toFixed(4)} ETH</td>
                         </tr>
                     `;
                     tableBody.innerHTML += row;
@@ -76,9 +117,10 @@
             }
         }
 
-        // 5초마다 데이터 갱신
+        // 10초마다 데이터 갱신
         fetchTransactions();
         setInterval(fetchTransactions, 10000);
     </script>
 </body>
+
 </html>
