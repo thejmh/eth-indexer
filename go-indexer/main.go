@@ -54,7 +54,13 @@ func main() {
 	r.GET("/api/transactions", func(c *gin.Context) {
 		var txs []Transaction
 		limit := 50
+
 		address := c.Query("address")
+		if address != "" {
+			// 사용자가 소문자로 입력해도 DB의 체크섬 주소와 매칭되도록 변환
+			address = toChecksumAddr(address)
+		}
+
 		blockNum := c.Query("block")
 
 		if address == "" && blockNum == "" {
@@ -152,7 +158,10 @@ func processBlock(client *ethclient.Client, db *gorm.DB) {
 }
 
 func fetchAndSaveBlock(client *ethclient.Client, db *gorm.DB, blockNum uint64) error {
-	block, err := client.BlockByNumber(context.Background(), new(big.Int).SetUint64(blockNum))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	block, err := client.BlockByNumber(ctx, new(big.Int).SetUint64(blockNum))
 	if err != nil {
 		return err
 	}
@@ -182,6 +191,10 @@ func fetchAndSaveBlock(client *ethclient.Client, db *gorm.DB, blockNum uint64) e
 			Value:       tx.Value().String(),
 			EthValue:    weiToEther(tx.Value().String()),
 			BlockNumber: blockNum,
+		}
+
+		if newTx.EthValue > 100 { // 100 ETH 이상 고액 거래
+			log.Printf("🐋 고래 출현! [Hash: %s] [Value: %.2f ETH]", newTx.Hash, newTx.EthValue)
 		}
 
 		// DB 저장
