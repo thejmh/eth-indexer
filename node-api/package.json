@@ -1,0 +1,10 @@
+{
+  "name": "eth-indexer-frontend",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "npx servor . index.html 3000 --reload" 
+  },
+  "dependencies": {
+    "servor": "^4.0.2"
+  }
+}
