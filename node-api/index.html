@@ -166,29 +166,6 @@
             });
         }
 
-        function handleSearch() {
-            const val = document.getElementById('searchInput').value.trim();
-            if (!val) return;
-            if (timer) clearInterval(timer); // 검색 시 자동 갱신 중지
-
-            // 숫자인지 주소(0x로 시작)인지 판단하여 쿼리 생성
-            let queryString = "";
-            if (val.startsWith("0x")) {
-                queryString = `?address=${val}`;
-            } else if (!isNaN(val)) {
-                queryString = `?block=${val}`;
-            }
-
-            fetchTransactions(queryString);
-        }
-
-        function clearSearch() {
-            document.getElementById('searchInput').value = "";
-            fetchTransactions();
-            if (timer) clearInterval(timer); // 검색 시 자동 갱신 중지
-            timer = setInterval(fetchTransactions, 10000);
-        }
-
         /**
          * [이론: 통합 함수 설계] 
          * query 인자가 없으면 기본값 ""을 사용함 (JS식 오버로딩 구현)
@@ -235,9 +212,87 @@
                 </tr>
             `;
         }
-        // 10초마다 데이터 갱신
+
+        let socket;
+        let isSearchMode = false; // [이론: 상태 변수] 검색 모드 여부 추적
+
+        function connectWebsocket() {
+            socket = new WebSocket("ws://localhost:8080/ws");
+
+            socket.onopen = () => {
+                document.getElementById('status').innerText = "Backend: Connected (Live)";
+                document.getElementById('status').classList.replace('text-gray-400', 'text-green-400');
+            };
+
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === "NEW_BLOCK") {
+                    // [핵심 로직] 검색 모드가 아닐 때만 자동 갱신 수행
+                    if (!isSearchMode) {
+                        console.log("🔔 새 블록 수신: 실시간 갱신 중...");
+                        fetchTransactions();
+                    } else {
+                        console.log("⏸️ 검색 모드 활성화 중: 실시간 갱신 일시 정지");
+                    }
+                }
+            };
+
+            socket.onclose = () => {
+                document.getElementById('status').innerText = "Backend: Reconnecting...";
+                document.getElementById('status').classList.replace('text-green-400', 'text-red-400');
+                setTimeout(connectWebsocket, 3000);
+            };
+        }
+
+        // --- 검색 제어 함수 수정 ---
+
+        function handleSearch() {
+            const val = document.getElementById('searchInput').value.trim();
+            if (!val) {
+                clearSearch(); // 빈 값 입력 시 초기화와 동일하게 처리
+                return;
+            }
+
+            // 1. 검색 모드 활성화 (웹소켓 갱신 차단)
+            isSearchMode = true;
+            updateStatusUI("Search Mode (Paused)");
+
+            let queryString = "";
+            if (val.startsWith("0x")) {
+                queryString = `?address=${val}`;
+            } else if (!isNaN(val)) {
+                queryString = `?block=${val}`;
+            }
+
+            fetchTransactions(queryString);
+        }
+
+        function clearSearch() {
+            document.getElementById('searchInput').value = "";
+
+            // 2. 검색 모드 해제 (실시간 갱신 다시 시작)
+            isSearchMode = false;
+            updateStatusUI("Live");
+
+            fetchTransactions();
+        }
+
+        // [유틸리티] 상단 상태 표시 텍스트 변경
+        function updateStatusUI(mode) {
+            const statusText = document.getElementById('status');
+            if (mode === "Live") {
+                statusText.innerText = "Backend: Connected (Live)";
+                statusText.classList.add('text-green-400');
+            } else {
+                statusText.innerText = `Backend: ${mode}`;
+                statusText.classList.replace('text-green-400', 'text-yellow-400');
+            }
+        }
+
+        // 초기 로드
         fetchTransactions();
-        timer = setInterval(fetchTransactions, 10000);
+        connectWebsocket();
+        // timer = setInterval(fetchTransactions, 10000);
     </script>
 </body>
 

@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -14,10 +15,61 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket" // go get github.com/gorilla/websocket 필요
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// --- WebSocket Hub 정의 ---
+type Hub struct {
+	clients    map[*websocket.Conn]bool
+	broadcast  chan bool
+	register   chan *websocket.Conn
+	unregister chan *websocket.Conn
+	mu         sync.Mutex
+}
+
+func newHub() *Hub {
+	return &Hub{
+		clients:    make(map[*websocket.Conn]bool),
+		broadcast:  make(chan bool),
+		register:   make(chan *websocket.Conn),
+		unregister: make(chan *websocket.Conn),
+	}
+}
+
+func (h *Hub) run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.mu.Lock()
+			h.clients[client] = true
+			h.mu.Unlock()
+		case client := <-h.unregister:
+			h.mu.Lock()
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				client.Close()
+			}
+			h.mu.Unlock()
+		case <-h.broadcast:
+			h.mu.Lock()
+			for client := range h.clients {
+				err := client.WriteJSON(gin.H{"type": "NEW_BLOCK"})
+				if err != nil {
+					client.Close()
+					delete(h.clients, client)
+				}
+			}
+			h.mu.Unlock()
+		}
+	}
+}
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
 
 // Transaction 데이터 모델 (Value를 가독성 있게 float64로 저장하거나 별도 필드 추가 가능)
 type Transaction struct {
@@ -45,22 +97,31 @@ func main() {
 		log.Fatal("RPC 연결 실패:", err)
 	}
 
+	// 웹소켓 허브 초기화 및 실행
+	hub := newHub()
+	go hub.run()
+
 	// 3. 백그라운드 인덱서 실행
-	go processBlock(client, db)
+	// 인덱서 실행 시 hub 전달
+	go processBlock(client, db, hub)
 
 	// 4. API 서버 설정
 	r := gin.Default()
 	r.Use(cors.Default())
+
+	// 웹소켓 엔드포인트
+	r.GET("/ws", func(c *gin.Context) {
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			return
+		}
+		hub.register <- conn
+	})
+
 	r.GET("/api/transactions", func(c *gin.Context) {
 		var txs []Transaction
 		limit := 50
-
 		address := c.Query("address")
-		if address != "" {
-			// 사용자가 소문자로 입력해도 DB의 체크섬 주소와 매칭되도록 변환
-			address = toChecksumAddr(address)
-		}
-
 		blockNum := c.Query("block")
 
 		if address == "" && blockNum == "" {
@@ -71,6 +132,7 @@ func main() {
 
 		// 1. 지갑 주소 필터링 (From 또는 To에 포함된 경우)
 		if address != "" {
+			address = toChecksumAddr(address)
 			// 주소는 대소문자 구분 없이 검색하기 위해 체크섬 처리를 하거나 OR 조건을 씁니다.
 			query = query.Where("from_address = ? OR to_address = ?", address, address)
 		}
@@ -111,17 +173,17 @@ func toChecksumAddr(addr string) string {
 	return common.HexToAddress(addr).Hex()
 }
 
-func processBlock(client *ethclient.Client, db *gorm.DB) {
+func processBlock(client *ethclient.Client, db *gorm.DB, hub *Hub) {
 	log.Println("🚀 블록 감시 및 자동 백필 루프 가동 시작...")
 
 	for {
-		// 1. [이론: 상태 확인] DB에서 가장 최신 저장된 블록 가져오기
-		var lastStoredTx Transaction
-		db.Order("block_number desc").First(&lastStoredTx)
+		// 1. [백필 핵심] DB에서 현재 저장된 가장 높은 블록 번호 조회
+		var lastTx Transaction
+		// 만약 데이터가 없으면 lastTx.BlockNumber는 0이 됨
+		db.Order("block_number desc").First(&lastTx)
+		lastStoredBlock := lastTx.BlockNumber
 
-		lastStoredBlock := lastStoredTx.BlockNumber
-
-		// 2. [이론: 목표 확인] 네트워크의 실제 최신 블록 번호 확인
+		// 2. 네트워크의 실제 최신 블록 번호 확인
 		header, err := client.HeaderByNumber(context.Background(), nil)
 		if err != nil {
 			log.Printf("❌ 네트워크 헤더 확인 에러: %v", err)
@@ -130,30 +192,33 @@ func processBlock(client *ethclient.Client, db *gorm.DB) {
 		}
 		latestBlock := header.Number.Uint64()
 
-		// 첫 실행 시 DB가 비어있다면 현재 블록의 바로 이전부터 시작하도록 설정
+		// 3. [초기화] DB가 완전히 비어있다면 현재 블록부터 시작 (혹은 원하는 지점)
 		if lastStoredBlock == 0 {
 			lastStoredBlock = latestBlock - 1
 		}
 
-		// 3. [이론: 백필 실행] DB와 네트워크 사이의 공백(Gap) 메우기
+		// 4. [백필 로직] 저장된 블록과 최신 블록 사이에 차이가 있다면 실행
 		if lastStoredBlock < latestBlock {
 			gap := latestBlock - lastStoredBlock
-			log.Printf("📥 공백 발견: #%d ~ #%d (총 %d개 블록 동기화 필요)", lastStoredBlock+1, latestBlock, gap)
+			log.Printf("📥 공백 발견: #%d ~ #%d (총 %d개 블록 동기화 중...)", lastStoredBlock+1, latestBlock, gap)
 
 			for i := lastStoredBlock + 1; i <= latestBlock; i++ {
 				err := fetchAndSaveBlock(client, db, i)
 				if err != nil {
-					log.Printf("⚠️ 블록 #%d 동기화 중 오류 발생: %v", i, err)
-					// 오류 발생 시 다음 루프에서 해당 번호부터 다시 시도하도록 break
-					break
+					log.Printf("⚠️ 블록 #%d 동기화 실패: %v", i, err)
+					break // 에러 시 다음 메인 루프에서 다시 시도
 				}
-				// RPC 노드의 Rate Limit을 고려해 아주 짧은 휴식 (옵션)
-				time.Sleep(500 * time.Millisecond)
+
+				// 저장 성공 시 웹소켓 알림 전송
+				hub.broadcast <- true
+
+				// RPC 노드 부하 방지용 짧은 휴식
+				time.Sleep(100 * time.Millisecond)
 			}
 		}
 
-		// 4. [이론: 실시간 대기] 다음 블록 생성을 기다림 (이더리움 약 12초 주기)
-		time.Sleep(12 * time.Second)
+		// 5. 다음 블록 생성을 기다림 (이더리움 평균 12초)
+		time.Sleep(10 * time.Second)
 	}
 }
 
