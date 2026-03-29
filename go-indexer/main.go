@@ -23,10 +23,10 @@ import (
 type Transaction struct {
 	ID          uint    `gorm:"primaryKey" json:"id"`
 	Hash        string  `gorm:"uniqueIndex" json:"hash"`
-	FromAddress string  `json:"from_address"`
-	ToAddress   string  `json:"to_address"`
-	Value       string  `json:"raw_value"` // JSON 필드명이 raw_value 임에 주의!
-	EthValue    float64 `json:"eth_value"` // 이미 백엔드에서 계산된 값
+	FromAddress string  `gorm:"index" json:"from_address"` // 인덱스 추가
+	ToAddress   string  `gorm:"index" json:"to_address"`   // 인덱스 추가
+	Value       string  `json:"raw_value"`                 // JSON 필드명이 raw_value 임에 주의!
+	EthValue    float64 `json:"eth_value"`                 // 이미 백엔드에서 계산된 값
 	BlockNumber uint64  `json:"block_number"`
 }
 
@@ -53,7 +53,31 @@ func main() {
 	r.Use(cors.Default())
 	r.GET("/api/transactions", func(c *gin.Context) {
 		var txs []Transaction
-		db.Order("block_number desc").Limit(50).Find(&txs)
+		limit := 50
+		address := c.Query("address")
+		blockNum := c.Query("block")
+
+		if address == "" && blockNum == "" {
+			limit = 10
+		}
+
+		query := db.Order("block_number desc").Limit(limit)
+
+		// 1. 지갑 주소 필터링 (From 또는 To에 포함된 경우)
+		if address != "" {
+			// 주소는 대소문자 구분 없이 검색하기 위해 체크섬 처리를 하거나 OR 조건을 씁니다.
+			query = query.Where("from_address = ? OR to_address = ?", address, address)
+		}
+
+		// 2. 특정 블록 번호 필터링
+		if blockNum != "" {
+			query = query.Where("block_number = ?", blockNum)
+		}
+
+		if err := query.Find(&txs).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "데이터 조회 실패"})
+			return
+		}
 		c.JSON(http.StatusOK, txs)
 	})
 	r.Run(":8080")

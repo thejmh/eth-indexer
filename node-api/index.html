@@ -36,6 +36,17 @@
         </div>
 
         <div class="bg-gray-800 rounded-xl shadow-2xl overflow-hidden border border-gray-700">
+            <div class="flex gap-4 mb-6">
+                <input id="searchInput" type="text" placeholder="지갑 주소 또는 블록 번호 입력"
+                    class="flex-1 bg-gray-800 border border-gray-700 text-white p-3 rounded-lg focus:outline-none focus:border-blue-500">
+                <button onclick="handleSearch()"
+                    class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-bold">
+                    검색
+                </button>
+                <button onclick="clearSearch()" class="bg-gray-700 hover:bg-gray-600 text-white px-6 py-3 rounded-lg">
+                    초기화
+                </button>
+            </div>
             <div class="p-6 border-b border-gray-700 bg-gray-800/50">
                 <h2 class="text-xl font-semibold">Latest Transactions</h2>
             </div>
@@ -47,7 +58,7 @@
                             <th class="p-4">Hash</th>
                             <th class="p-4">From</th>
                             <th class="p-4">To</th>
-                            <th class="p-4 text-right">Value (Wei)</th>
+                            <th class="p-4">Value (Wei)</th>
                             <th class="p-4 text-right">Value (ETH)</th>
                         </tr>
                     </thead>
@@ -60,7 +71,87 @@
 
     <script>
         // 주소 축약 함수 (예: 0x1234...abcd)
-        const shortAddr = (addr) => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : 'Contract Creation';
+        //const shortAddr = (addr) => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : 'Contract Creation';
+        // 주소 축약 함수 (0x1234...abcd)
+        const shortAddr = (addr) => addr && addr.length > 10
+            ? `${addr.substring(0, 6)}...${addr.substring(addr.length - 4)}`
+            : addr;
+        let timer;
+
+        /**
+         * [이론: 데이터 매핑] API 응답 데이터를 HTML 테이블로 변환
+         * @param {Array} transactions - 백엔드에서 받은 트랜잭션 배열
+         */
+        function renderTable(transactions) {
+            const tableBody = document.getElementById('tx-table-body'); // tbody ID 가정
+            tableBody.innerHTML = ''; // 기존 데이터 초기화
+
+            // 1. [이론: 예외 처리] 데이터가 없을 경우 처리
+            if (!transactions || transactions.length === 0) {
+                tableBody.innerHTML = `
+            <tr>
+                <td colspan="5" class="p-10 text-center text-gray-500 italic">
+                    🔍 검색 결과가 없거나 데이터가 아직 로드되지 않았습니다.
+                </td>
+            </tr>`;
+                return;
+            }
+
+            // 2. [이론: 데이터 순회] 트랜잭션 리스트를 돌며 행(Row) 생성
+            transactions.forEach(tx => {
+                const row = document.createElement('tr');
+
+                // ETH 값 포맷팅 (소수점 4자리)
+                const displayEth = tx.eth_value ? tx.eth_value.toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 4
+                }) : "0.0000";
+
+                row.className = "border-b border-gray-800 hover:bg-gray-800/50 transition-colors";
+                row.innerHTML = `
+                    <td class="p-4 text-blue-400 font-mono text-sm">#${tx.block_number}</td>
+                    <td class="p-4 text-gray-300 font-mono text-xs" title="${tx.hash}">
+                        ${shortAddr(tx.hash)}
+                    </td>
+                    <td class="p-4 text-orange-300 font-mono text-sm" title="${tx.from_address}">
+                        ${shortAddr(tx.from_address)}
+                    </td>
+                    <td class="p-4 text-green-300 font-mono text-sm" title="${tx.to_address}">
+                        ${shortAddr(tx.to_address)}
+                    </td>
+                    <td class="p-4 text-green-300 font-mono text-sm" title="${tx.to_address}">
+                        ${shortAddr(tx.raw_value)}
+                    </td>
+                    <td class="p-4 text-right font-bold text-white">
+                        ${displayEth} <span class="text-xs text-gray-500 font-normal ml-1">ETH</span>
+                    </td>
+                `;
+
+                tableBody.appendChild(row);
+            });
+        }
+
+        function handleSearch() {
+            const val = document.getElementById('searchInput').value.trim();
+            if (!val) return;
+            if (timer) clearInterval(timer); // 검색 시 자동 갱신 중지
+
+            // 숫자인지 주소(0x로 시작)인지 판단하여 쿼리 생성
+            let queryString = "";
+            if (val.startsWith("0x")) {
+                queryString = `?address=${val}`;
+            } else if (!isNaN(val)) {
+                queryString = `?block=${val}`;
+            }
+
+            fetchTransactions(queryString);
+        }
+
+        function clearSearch() {
+            document.getElementById('searchInput').value = "";
+            fetchTransactions();
+            timer = setInterval(fetchTransactions, 10000);
+        }
 
         // 1 ETH = 10^18 Wei 변환 함수
         const formatEth = (weiValue) => {
@@ -85,41 +176,35 @@
                 return "Error";
             }
         };
-
-        async function fetchTransactions() {
+        /**
+         * [이론: 통합 함수 설계] 
+         * query 인자가 없으면 기본값 ""을 사용함 (JS식 오버로딩 구현)
+         */
+        async function fetchTransactions(query = "") {
             try {
-                const response = await fetch('http://localhost:8080/api/transactions');
+                console.log("🔍 요청 쿼리:", query); // 디버깅용
+
+                // 1. [이론: URL 조합] 쿼리가 있으면 붙이고 없으면 기본 경로 사용
+                const url = `http://localhost:8080/api/transactions${query}`;
+
+                const response = await fetch(url);
+                if (!response.ok) throw new Error("네트워크 응답 에러");
+
                 const data = await response.json();
 
-                const tableBody = document.getElementById('tx-table-body');
-                const status = document.getElementById('status');
+                // 2. 데이터 렌더링 함수 호출
+                renderTable(data);
 
-                status.innerText = `Last Sync: ${new Date().toLocaleTimeString()}`;
-
-                // 테이블 초기화 후 렌더링
-                tableBody.innerHTML = '';
-                data.forEach(tx => {
-                    const row = `
-                        <tr class="hover:bg-gray-700/30 transition-colors">
-                            <td class="p-4 text-blue-300">#${tx.block_number}</td>
-                            <td class="p-4 text-gray-400" title="${tx.hash}">${shortAddr(tx.hash)}</td>
-                            <td class="p-4 text-orange-300">${shortAddr(tx.from_address)}</td>
-                            <td class="p-4 text-green-300">${shortAddr(tx.to_address)}</td>
-                            <td class="p-4 text-right font-bold text-white">${formatEth(tx.value)}</td>
-                            <td class="p-4 text-right font-bold text-white">${tx.eth_value.toFixed(4)} ETH</td>
-                        </tr>
-                    `;
-                    tableBody.innerHTML += row;
-                });
             } catch (error) {
-                console.error('Fetch error:', error);
-                document.getElementById('status').innerText = 'Backend: Disconnected';
+                console.error("❌ 데이터 로드 실패:", error);
+                // 에러 발생 시 사용자에게 알림 (선택 사항)
+                const tableBody = document.getElementById('transactionBody');
+                tableBody.innerHTML = `<tr><td colspan="5" class="text-center p-4 text-red-500">데이터를 가져오는데 실패했습니다.</td></tr>`;
             }
         }
-
         // 10초마다 데이터 갱신
         fetchTransactions();
-        setInterval(fetchTransactions, 10000);
+        timer = setInterval(fetchTransactions, 10000);
     </script>
 </body>
 
