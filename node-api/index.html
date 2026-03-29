@@ -58,6 +58,13 @@
                     초기화
                 </button>
             </div>
+            <div id="newBlockAlert" onclick="clearSearch()"
+                class="hidden cursor-pointer mb-4 p-3 bg-blue-600/20 border border-blue-500 rounded-lg text-center hover:bg-blue-600/30 transition-all">
+                <span class="text-blue-400 font-bold">
+                    🔔 새로운 블록이 <span id="newBlockCount">0</span>개 생성되었습니다.
+                    <span class="text-xs underline ml-2">(클릭하여 실시간 모드로 복구)</span>
+                </span>
+            </div>
             <div class="p-6 border-b border-gray-700 bg-gray-800/50">
                 <h2 class="text-xl font-semibold">Latest Transactions</h2>
             </div>
@@ -112,6 +119,7 @@
             }
         };
         let timer;
+        let unreadCount = 0; // [이론: 카운터] 미확인 블록 수 저장
 
         /**
          * [이론: 데이터 매핑] API 응답 데이터를 HTML 테이블로 변환
@@ -233,6 +241,8 @@
                         fetchTransactions();
                     } else {
                         console.log("⏸️ 검색 모드 활성화 중: 실시간 갱신 일시 정지");
+                        unreadCount++;
+                        showBadge();
                     }
                 }
             };
@@ -244,8 +254,21 @@
             };
         }
 
-        // --- 검색 제어 함수 수정 ---
+        // --- 배지 제어 함수 ---
+        function showBadge() {
+            const alertBox = document.getElementById('newBlockAlert');
+            const countText = document.getElementById('newBlockCount');
 
+            countText.innerText = unreadCount;
+            alertBox.classList.remove('hidden'); // 배지 노출
+        }
+        function hideBadge() {
+            const alertBox = document.getElementById('newBlockAlert');
+            unreadCount = 0; // 카운트 초기화
+            alertBox.classList.add('hidden'); // 배지 숨김
+        }
+
+        // --- 검색 제어 함수 수정 ---
         function handleSearch() {
             const val = document.getElementById('searchInput').value.trim();
             if (!val) {
@@ -255,6 +278,7 @@
 
             // 1. 검색 모드 활성화 (웹소켓 갱신 차단)
             isSearchMode = true;
+            hideBadge(); // 새 검색 시작 시 이전 배지 청소
             updateStatusUI("Search Mode (Paused)");
 
             let queryString = "";
@@ -266,17 +290,16 @@
 
             fetchTransactions(queryString);
         }
-
         function clearSearch() {
             document.getElementById('searchInput').value = "";
 
             // 2. 검색 모드 해제 (실시간 갱신 다시 시작)
             isSearchMode = false;
+            
+            hideBadge(); // 배지 초기화
             updateStatusUI("Live");
-
             fetchTransactions();
         }
-
         // [유틸리티] 상단 상태 표시 텍스트 변경
         function updateStatusUI(mode) {
             const statusText = document.getElementById('status');
