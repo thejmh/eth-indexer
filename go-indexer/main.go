@@ -66,35 +66,49 @@ func main() {
 
 // [함수 1] processBlock: 고수준 관리자 (흐름 제어)
 func processBlock(client *ethclient.Client, db *gorm.DB) {
-	log.Println("🚀 블록 감시 루프 가동 시작...")
-	var lastProcessedBlock uint64
+	log.Println("🚀 블록 감시 및 자동 백필 루프 가동...")
 
 	for {
-		// 최신 블록 넘버 확인
+		// 1. DB에서 가장 마지막으로 저장된 블록 번호 가져오기
+		var lastStoredBlock Transaction
+		db.Order("block_number desc").First(&lastStoredBlock)
+
+		// DB가 비어있다면 현재 블록부터 시작 (혹은 특정 과거 블록 지정 가능)
+		startBlock := lastStoredBlock.BlockNumber
+
+		// 2. 네트워크의 최신 블록 번호 확인
 		header, err := client.HeaderByNumber(context.Background(), nil)
 		if err != nil {
-			log.Println("❌ 블록 헤더 확인 에러:", err)
-			time.Sleep(12 * time.Second)
+			log.Println("❌ 최신 헤더 확인 에러:", err)
+			time.Sleep(5 * time.Second)
 			continue
 		}
+		latestBlock := header.Number.Uint64()
 
-		currentBlock := header.Number.Uint64()
+		// 첫 실행 시 초기값 설정
+		if startBlock == 0 {
+			startBlock = latestBlock - 1
+		}
 
-		// 새로운 블록이 발견되었을 때만 실행
-		if currentBlock > lastProcessedBlock {
-			log.Printf("🔍 새 블록 발견: #%d", currentBlock)
+		// 3. 공백 메우기 (Back-filling)
+		// DB에 저장된 마지막 블록 다음 번호부터 최신 블록까지 순회
+		if startBlock < latestBlock {
+			log.Printf("📥 공백 발견: #%d ~ #%d (총 %d개 블록)", startBlock+1, latestBlock, latestBlock-startBlock)
 
-			// 실제 작업 수행자(fetchAndSaveBlock) 호출
-			err := fetchAndSaveBlock(client, db, currentBlock)
-			if err != nil {
-				log.Printf("⚠️ 블록 #%d 처리 중 오류: %v", currentBlock, err)
-			} else {
-				lastProcessedBlock = currentBlock
+			for i := startBlock + 1; i <= latestBlock; i++ {
+				err := fetchAndSaveBlock(client, db, i)
+				if err != nil {
+					log.Printf("⚠️ 블록 #%d 동기화 중 오류: %v", i, err)
+					// 오류 발생 시 해당 지점부터 다시 시도하기 위해 루프 탈출
+					break
+				}
+				// 팁: 너무 빨리 요청하면 RPC에서 차단될 수 있으니 아주 짧은 휴식 추가 가능
+				time.Sleep(1000 * time.Millisecond)
 			}
 		}
 
-		// 이더리움 블록 생성 주기(약 12초)에 맞춰 대기
-		time.Sleep(12 * time.Second)
+		// 4. 다음 체크까지 대기 (실시간 감시 주기)
+		time.Sleep(10 * time.Second)
 	}
 }
 
