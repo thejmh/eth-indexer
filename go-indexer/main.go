@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"math/big"
@@ -15,27 +17,39 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket" // go get github.com/gorilla/websocket 필요
+	"github.com/gorilla/websocket"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
+var (
+	alertThreshold float64 = 100.0
+	thresholdMu    sync.RWMutex
+	upgrader       = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+)
+
+type Client struct {
+	hub  *Hub
+	conn *websocket.Conn
+	send chan []byte
+}
+
 // --- WebSocket Hub 정의 ---
 type Hub struct {
-	clients    map[*websocket.Conn]bool
-	broadcast  chan bool
-	register   chan *websocket.Conn
-	unregister chan *websocket.Conn
+	clients    map[*Client]bool
+	broadcast  chan []byte
+	register   chan *Client
+	unregister chan *Client
 	mu         sync.Mutex
 }
 
 func newHub() *Hub {
 	return &Hub{
-		clients:    make(map[*websocket.Conn]bool),
-		broadcast:  make(chan bool),
-		register:   make(chan *websocket.Conn),
-		unregister: make(chan *websocket.Conn),
+		broadcast:  make(chan []byte),
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+		clients:    make(map[*Client]bool),
 	}
 }
 
@@ -43,32 +57,23 @@ func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
-			h.mu.Lock()
 			h.clients[client] = true
-			h.mu.Unlock()
 		case client := <-h.unregister:
-			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				client.Close()
+				close(client.send)
 			}
-			h.mu.Unlock()
-		case <-h.broadcast:
-			h.mu.Lock()
+		case message := <-h.broadcast:
 			for client := range h.clients {
-				err := client.WriteJSON(gin.H{"type": "NEW_BLOCK"})
-				if err != nil {
-					client.Close()
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
 					delete(h.clients, client)
 				}
 			}
-			h.mu.Unlock()
 		}
 	}
-}
-
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 // Transaction 데이터 모델 (Value를 가독성 있게 float64로 저장하거나 별도 필드 추가 가능)
@@ -102,16 +107,34 @@ func main() {
 	hub := newHub()
 	go hub.run()
 
-	// 데이터 클리너 실행
-	go startDataCleaner(db)
-
 	// 3. 백그라운드 인덱서 실행
 	// 인덱서 실행 시 hub 전달
 	go processBlock(client, db, hub)
 
+	// 데이터 클리너 실행
+	go startDataCleaner(db)
+
 	// 4. API 서버 설정
 	r := gin.Default()
 	r.Use(cors.Default())
+
+	// 고래 알림 API
+	r.GET("/api/currentSet", func(c *gin.Context) {
+		c.JSON(http.StatusOK, alertThreshold)
+	})
+
+	// 고래 알림 설정 API
+	r.POST("/api/settings", func(c *gin.Context) {
+		var in struct {
+			Threshold float64 `json:"threshold"`
+		}
+		if err := c.BindJSON(&in); err == nil {
+			thresholdMu.Lock()
+			alertThreshold = in.Threshold
+			thresholdMu.Unlock()
+			c.JSON(200, gin.H{"status": "ok"})
+		}
+	})
 
 	// 웹소켓 엔드포인트
 	r.GET("/ws", func(c *gin.Context) {
@@ -119,7 +142,21 @@ func main() {
 		if err != nil {
 			return
 		}
-		hub.register <- conn
+		client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
+		hub.register <- client
+		go func() {
+			defer func() { hub.unregister <- client; conn.Close() }()
+			for {
+				_, message, err := conn.ReadMessage()
+				if err != nil {
+					break
+				}
+				hub.broadcast <- message
+			}
+		}()
+		for msg := range client.send {
+			conn.WriteMessage(websocket.TextMessage, msg)
+		}
 	})
 
 	r.GET("/api/transactions", func(c *gin.Context) {
@@ -177,6 +214,59 @@ func toChecksumAddr(addr string) string {
 	return common.HexToAddress(addr).Hex()
 }
 
+// --- API 핸들러: 설정 가져오기 및 저장 ---
+func setupSettingRoutes(r *gin.Engine) {
+	// 현재 설정값 조회
+	r.GET("/api/settings", func(c *gin.Context) {
+		thresholdMu.RLock() // 읽기 잠금
+		defer thresholdMu.RUnlock()
+		c.JSON(http.StatusOK, gin.H{"threshold": alertThreshold})
+	})
+
+	// 새로운 설정값 저장
+	r.POST("/api/settings", func(c *gin.Context) {
+		var input struct {
+			Threshold float64 `json:"threshold"`
+		}
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "잘못된 입력값입니다."})
+			return
+		}
+
+		thresholdMu.Lock() // 쓰기 잠금
+		alertThreshold = input.Threshold
+		thresholdMu.Unlock()
+
+		log.Printf("⚙️  알림 임계값이 %.2f ETH로 변경되었습니다.", input.Threshold)
+		c.JSON(http.StatusOK, gin.H{"message": "설정이 저장되었습니다.", "threshold": alertThreshold})
+	})
+}
+
+// --- 인덱서 로직 내 알림 체크 기능 ---
+func checkWhaleAlert(tx Transaction, hub *Hub) {
+	thresholdMu.RLock()
+	currentThreshold := alertThreshold
+	thresholdMu.RUnlock()
+
+	// [핵심 로직] 저장된 트랜잭션 금액이 설정된 임계값 이상인지 검사
+	if tx.EthValue >= currentThreshold {
+		log.Printf("🚨 고래 감지! [%.2f ETH] Hash: %s", tx.EthValue, tx.Hash)
+
+		// 웹소켓을 통해 프론트엔드로 특수 이벤트 전송
+		whaleEvent := map[string]interface{}{
+			"type":    "WHALE_ALERT",
+			"value":   tx.EthValue,
+			"from":    tx.FromAddress,
+			"to":      tx.ToAddress,
+			"hash":    tx.Hash,
+			"message": fmt.Sprintf("🐋 %.2f ETH 고액 거래가 발생했습니다!", tx.EthValue),
+		}
+
+		msgBytes, _ := json.Marshal(whaleEvent)
+		hub.broadcast <- msgBytes // Hub를 통해 연결된 모든 클라이언트에 전송
+	}
+}
+
 // 1시간마다 깨어나서 24시간 전 데이터를 삭제하는 함수
 func startDataCleaner(db *gorm.DB) {
 	log.Println("🧹 데이터 클리너(TTL 24h) 가동 시작...")
@@ -225,14 +315,15 @@ func processBlock(client *ethclient.Client, db *gorm.DB, hub *Hub) {
 			log.Printf("📥 공백 발견: #%d ~ #%d (총 %d개 블록 동기화 중...)", lastStoredBlock+1, latestBlock, gap)
 
 			for i := lastStoredBlock + 1; i <= latestBlock; i++ {
-				err := fetchAndSaveBlock(client, db, i)
+				err := fetchAndSaveBlock(client, db, i, hub)
 				if err != nil {
 					log.Printf("⚠️ 블록 #%d 동기화 실패: %v", i, err)
 					break // 에러 시 다음 메인 루프에서 다시 시도
 				}
 
 				// 저장 성공 시 웹소켓 알림 전송
-				hub.broadcast <- true
+				syncMsg, _ := json.Marshal(map[string]interface{}{"type": "NEW_BLOCK", "number": latestBlock})
+				hub.broadcast <- syncMsg
 
 				// RPC 노드 부하 방지용 짧은 휴식
 				time.Sleep(100 * time.Millisecond)
@@ -244,7 +335,7 @@ func processBlock(client *ethclient.Client, db *gorm.DB, hub *Hub) {
 	}
 }
 
-func fetchAndSaveBlock(client *ethclient.Client, db *gorm.DB, blockNum uint64) error {
+func fetchAndSaveBlock(client *ethclient.Client, db *gorm.DB, blockNum uint64, hub *Hub) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -280,8 +371,18 @@ func fetchAndSaveBlock(client *ethclient.Client, db *gorm.DB, blockNum uint64) e
 			BlockNumber: blockNum,
 		}
 
-		if newTx.EthValue > 100 { // 100 ETH 이상 고액 거래
+		// 고래 알림 체크
+		thresholdMu.RLock()
+		limit := alertThreshold
+		thresholdMu.RUnlock()
+
+		if newTx.EthValue >= limit { // 기준 ETH 이상 고액 거래
 			log.Printf("🐋 고래 출현! [Hash: %s] [Value: %.2f ETH]", newTx.Hash, newTx.EthValue)
+
+			event, _ := json.Marshal(map[string]interface{}{
+				"type": "WHALE_ALERT", "value": newTx.EthValue, "hash": tx.Hash().Hex(),
+			})
+			hub.broadcast <- event
 		}
 
 		// DB 저장
