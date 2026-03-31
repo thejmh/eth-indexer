@@ -73,13 +73,14 @@ var upgrader = websocket.Upgrader{
 
 // Transaction 데이터 모델 (Value를 가독성 있게 float64로 저장하거나 별도 필드 추가 가능)
 type Transaction struct {
-	ID          uint    `gorm:"primaryKey" json:"id"`
-	Hash        string  `gorm:"uniqueIndex" json:"hash"`
-	FromAddress string  `gorm:"index" json:"from_address"` // 인덱스 추가
-	ToAddress   string  `gorm:"index" json:"to_address"`   // 인덱스 추가
-	Value       string  `json:"raw_value"`                 // JSON 필드명이 raw_value 임에 주의!
-	EthValue    float64 `json:"eth_value"`                 // 이미 백엔드에서 계산된 값
-	BlockNumber uint64  `json:"block_number"`
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Hash        string    `gorm:"uniqueIndex" json:"hash"`
+	FromAddress string    `gorm:"index" json:"from_address"` // 인덱스 추가
+	ToAddress   string    `gorm:"index" json:"to_address"`   // 인덱스 추가
+	Value       string    `json:"raw_value"`                 // JSON 필드명이 raw_value 임에 주의!
+	EthValue    float64   `json:"eth_value"`                 // 이미 백엔드에서 계산된 값
+	BlockNumber uint64    `json:"block_number"`
+	CreatedAt   time.Time `gorm:"index" json:"created_at"` // [추가] 인덱싱된 시간
 }
 
 func main() {
@@ -100,6 +101,9 @@ func main() {
 	// 웹소켓 허브 초기화 및 실행
 	hub := newHub()
 	go hub.run()
+
+	// 데이터 클리너 실행
+	go startDataCleaner(db)
 
 	// 3. 백그라운드 인덱서 실행
 	// 인덱서 실행 시 hub 전달
@@ -171,6 +175,24 @@ func toChecksumAddr(addr string) string {
 	}
 	// common.HexToAddress가 주소 형식을 검증하고 .Hex()가 체크섬을 적용함
 	return common.HexToAddress(addr).Hex()
+}
+
+// 1시간마다 깨어나서 24시간 전 데이터를 삭제하는 함수
+func startDataCleaner(db *gorm.DB) {
+	log.Println("🧹 데이터 클리너(TTL 24h) 가동 시작...")
+	for {
+		// 현재 시간 기준 24시간 전 시점 계산
+		threshold := time.Now().Add(-24 * time.Hour)
+		// 24시간보다 이전에 생성된 데이터 삭제
+		result := db.Where("created_at < ?", threshold).Delete(&Transaction{})
+
+		if result.RowsAffected > 0 {
+			log.Printf("♻️  TTL 정리 완료: 오래된 트랜잭션 %d건 삭제됨", result.RowsAffected)
+		}
+
+		// 1시간 대기 후 다시 확인
+		time.Sleep(1 * time.Hour)
+	}
 }
 
 func processBlock(client *ethclient.Client, db *gorm.DB, hub *Hub) {
