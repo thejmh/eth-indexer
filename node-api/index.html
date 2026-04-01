@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Eth Mini Indexer Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         @keyframes pulse {
 
@@ -54,7 +55,8 @@
                             class="w-full bg-gray-900 border border-gray-600 p-2 rounded mb-4 focus:outline-none focus:border-blue-500">
                         <div class="flex justify-end gap-2">
                             <button onclick="closeSettings()" class="px-4 py-2 text-gray-400">취소</button>
-                            <button onclick="saveSettings()" id="saveBtn" class=" px-4 py-2 bg-blue-600 rounded font-bold">저장</button>
+                            <button onclick="saveSettings()" id="saveBtn"
+                                class=" px-4 py-2 bg-blue-600 rounded font-bold">저장</button>
                         </div>
                     </div>
                 </div>
@@ -80,6 +82,11 @@
                     <span class="text-xs underline ml-2">(클릭하여 실시간 모드로 복구)</span>
                 </span>
             </div>
+            <div id="chartContainer" class="hidden bg-gray-800 p-6 rounded-xl border border-gray-700 mb-8"
+                style="position: relative; height: 400px; width: 100%;">
+                <h3 class="text-lg font-semibold mb-4 text-gray-300">24h 자산 흐름 추이</h3>
+                <canvas id="balanceChart"></canvas>
+            </div>
             <div class="p-6 border-b border-gray-700 bg-gray-800/50">
                 <h2 class="text-xl font-semibold">Latest Transactions</h2>
             </div>
@@ -103,6 +110,7 @@
     </div>
 
     <script>
+        // Utility Functions
         // 주소 축약 함수 (예: 0x1234...abcd)
         //const shortAddr = (addr) => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : 'Contract Creation';
         // 주소 축약 함수 (0x1234...abcd)
@@ -135,7 +143,7 @@
         };
         let timer;
         let unreadCount = 0; // [이론: 카운터] 미확인 블록 수 저장
-
+        // --- 핵심 함수: API 데이터 렌더링 ---
         /**
          * [이론: 데이터 매핑] API 응답 데이터를 HTML 테이블로 변환
          * @param {Array} transactions - 백엔드에서 받은 트랜잭션 배열
@@ -220,9 +228,7 @@
             }
         }
 
-        /**
-         * [이론: 로딩 상태 UI] 로딩 중임을 시각적으로 표시하는 HTML 반환
-         */
+        // --- 로딩 상태 UI 함수 ---
         function getLoadingSpinner() {
             return `
                 <tr>
@@ -238,7 +244,7 @@
 
         let socket;
         let isSearchMode = false; // [이론: 상태 변수] 검색 모드 여부 추적
-
+        // --- 웹소켓 연결 및 이벤트 핸들링 ---
         function connectWebsocket() {
             socket = new WebSocket("ws://localhost:8080/ws");
 
@@ -284,6 +290,7 @@
             const alertBox = document.getElementById('newBlockAlert');
             unreadCount = 0; // 카운트 초기화
             alertBox.classList.add('hidden'); // 배지 숨김
+            hideChart(); // 차트도 숨김 (검색 초기화 시)
         }
 
         // --- 검색 제어 함수 수정 ---
@@ -307,6 +314,8 @@
             }
 
             fetchTransactions(queryString);
+
+            if (val.startsWith("0x")) updateChartUI(val);
         }
         function clearSearch() {
             document.getElementById('searchInput').value = "";
@@ -315,9 +324,11 @@
             isSearchMode = false;
 
             hideBadge(); // 배지 초기화
+            hideChart(); // 차트 숨김
             updateStatusUI("Live");
             fetchTransactions();
         }
+
         // [유틸리티] 상단 상태 표시 텍스트 변경
         function updateStatusUI(mode) {
             const statusText = document.getElementById('status');
@@ -393,6 +404,7 @@
                 saveBtn.innerText = "설정 저장";
             }
         }
+
         // --- 고액 거래 알림 함수 ---
         function showWhaleAlert(data) {
             const toast = document.createElement('div');
@@ -413,6 +425,86 @@
             // new Audio('alert_sound.mp3').play();
 
             setTimeout(() => toast.remove(), 7000); // 7초 후 삭제
+        }
+
+        let myChart; // 전역 변수로 차트 인스턴스 관리
+        // --- 차트 업데이트 함수 ---
+        async function updateChartUI(address) {
+            try {
+                const response = await fetch(`http://localhost:8080/api/balance/history?address=${address}`);
+                const data = await response.json();
+
+                if (!data.labels || data.labels.length === 0) {
+                    // 데이터가 없을 때의 UI 처리
+                    document.getElementById('chartContainer').innerHTML = `
+                        <div class="text-center py-10 text-gray-500">
+                            <p>📭 최근 24시간 동안의 거래 내역이 없습니다.</p>
+                        </div>
+                    `;
+                    return;
+                }
+                document.getElementById('chartContainer').classList.remove('hidden');
+
+                const ctx = document.getElementById('balanceChart').getContext('2d');
+
+                // 기존 차트가 있으면 파괴 (메모리 누수 방지)
+                if (myChart) myChart.destroy();
+
+                myChart = new Chart(ctx, {
+                    type: 'line', // 선 그래프
+                    data: {
+                        labels: data.labels, // x축 (시간)
+                        datasets: [
+                            {
+                                label: 'Total In (ETH)',
+                                data: data.incoming, // y축 (입금액)
+                                borderColor: '#4ade80', // green-400
+                                backgroundColor: 'rgba(74, 222, 128, 0.1)',
+                                fill: true, // 영역 채우기
+                                tension: 0.3 // 곡선 부드럽게
+                            },
+                            {
+                                label: 'Total Out (ETH)',
+                                data: data.outgoing, // y축 (출금액)
+                                borderColor: '#f87171', // red-400
+                                backgroundColor: 'rgba(248, 113, 113, 0.1)',
+                                fill: true,
+                                tension: 0.3
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { labels: { color: '#9ca3af' } } // gray-400
+                        },
+                        scales: {
+                            x: { ticks: { color: '#6b7280' }, grid: { display: false } }, // gray-500
+                            y: { ticks: { color: '#6b7280' }, grid: { color: '#374151' } } // gray-700
+                        }
+                    }
+                });
+            } catch (e) {
+                console.error("그래프 로드 실패", e);
+            }
+        }
+        async function initChart() {
+            const canvas = document.getElementById('balanceChart');
+            if (!canvas) {
+                console.error("❌ canvas 엘리먼트를 찾을 수 없습니다!");
+                return;
+            }
+            const ctx = canvas.getContext('2d');
+        }
+        window.addEventListener('DOMContentLoaded', (event) => {
+            initChart();
+        });
+        async function hideChart() {
+            const chartContainer = document.getElementById('chartContainer');
+            if (chartContainer) {
+                chartContainer.classList.add('hidden');
+            }
         }
         // 초기 로드
         fetchTransactions();

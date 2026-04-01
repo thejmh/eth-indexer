@@ -159,6 +159,61 @@ func main() {
 		}
 	})
 
+	// [이론: 시계열 집계] SQLite의 strftime 함수를 사용하여 시간별 그룹화
+	r.GET("/api/balance/history", func(c *gin.Context) {
+		address := c.Query("address")
+		if address == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "주소를 입력해주세요"})
+			return
+		}
+		address = toChecksumAddr(address)
+		log.Printf("📊 요청된 주소: %s", address)
+
+		var totalCount int64
+		db.Model(&Transaction{}).Where("from_address = ? OR to_address = ?", address, address).Count(&totalCount)
+		log.Printf("📝 DB 내 해당 주소의 전체 트랜잭션 수: %d", totalCount)
+
+		type TimeSeriesPoint struct {
+			HourTime string  `json:"hour_time"`
+			Incoming float64 `json:"incoming"`
+			Outgoing float64 `json:"outgoing"`
+		}
+		var history []TimeSeriesPoint
+
+		// 최근 24시간 데이터를 1시간 단위로 SUM (strftime 사용)
+		query := `
+			SELECT 
+				strftime('%Y-%m-%d %H:00', created_at) as hour_time,
+				SUM(CASE WHEN to_address = ? THEN eth_value ELSE 0 END) as incoming,
+				SUM(CASE WHEN from_address = ? THEN eth_value ELSE 0 END) as outgoing
+			FROM transactions
+			WHERE (from_address = ? OR to_address = ?) 
+			AND created_at >= datetime('now', '-24 hours')
+			GROUP BY hour_time
+			ORDER BY hour_time ASC
+		`
+
+		db.Raw(query, address, address, address, address).Scan(&history)
+
+		// 데이터를 Chart.js가 읽기 쉬운 형태로 가공
+		labels := []string{}
+		inData := []float64{}
+		outData := []float64{}
+
+		for _, pt := range history {
+			// '2023-10-27 15:00' -> '15:00'으로 축약
+			labels = append(labels, pt.HourTime[11:])
+			inData = append(inData, pt.Incoming)
+			outData = append(outData, pt.Outgoing)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"labels":   labels,
+			"incoming": inData,
+			"outgoing": outData,
+		})
+	})
+
 	r.GET("/api/transactions", func(c *gin.Context) {
 		var txs []Transaction
 		limit := 50
