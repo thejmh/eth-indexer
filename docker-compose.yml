@@ -9,7 +9,9 @@ services:
     volumes:
       - ./go-indexer:/app
     environment:
-      - ETH_RPC_URL=https://mainnet.infura.io/v3/YOUR_KEY
+      - ETH_RPC_URL=https://mainnet.infura.io/v3/<YOUR_INFURA_PROJECT_ID>
+      - TELEGRAM_BOT_TOKEN=<YOUR_TELEGRAM_BOT_TOKEN>
+      - TELEGRAM_CHAT_ID=<YOUR_TELEGRAM_CHAT_ID>
       - DB_URL=postgres://user:pass@db:5432/eth_db
     depends_on:
       - db

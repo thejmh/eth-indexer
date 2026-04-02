@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -366,6 +367,29 @@ func startDataCleaner(db *gorm.DB) {
 	}
 }
 
+// [이론: 외부 API 연동] 텔레그램 API로 HTTP POST 요청을 보냄
+func sendTelegramAlert(message string) {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", os.Getenv("TELEGRAM_BOT_TOKEN"))
+
+	payload := map[string]string{
+		"chat_id":    os.Getenv("TELEGRAM_CHAT_ID"),
+		"text":       message,
+		"parse_mode": "HTML",
+	}
+	// log.Println("url:", url)
+	// log.Println("payload:", payload)
+
+	jsonPayload, _ := json.Marshal(payload)
+
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		log.Printf("❌ 텔레그램 전송 실패: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	log.Println("📱 텔레그램 고래 알림 전송 완료!")
+}
+
 func processBlock(client *ethclient.Client, db *gorm.DB, hub *Hub) {
 	log.Println("🚀 블록 감시 및 자동 백필 루프 가동 시작...")
 
@@ -457,11 +481,25 @@ func fetchAndSaveBlock(client *ethclient.Client, db *gorm.DB, blockNum uint64, h
 		limit := alertThreshold
 		thresholdMu.RUnlock()
 
-		if newTx.EthValue >= limit { // 기준 ETH 이상 고액 거래
+		// 기준 ETH 이상 고액 거래 감지 시 알림
+		if newTx.EthValue >= limit {
 			log.Printf("🐋 고래 출현! [Hash: %s] [Value: %.2f ETH]", newTx.Hash, newTx.EthValue)
 
+			// 2. 텔레그램 푸시 (추가)
+			msg := fmt.Sprintf(
+				"<b>🚨 WHALE ALERT (이더리움 고래 출현)</b>\n\n"+
+					"💰 <b>금액:</b> %.2f ETH\n"+
+					"👤 <b>From:</b> <code>%s</code>\n"+
+					"📥 <b>To:</b> <code>%s</code>\n"+
+					"🔗 <a href='https://etherscan.io/tx/%s'>이더스캔에서 보기</a>",
+				newTx.EthValue, newTx.FromAddress, newTx.ToAddress, newTx.Hash,
+			)
+			// 고루틴으로 실행하여 메인 인덱싱 루프가 지연되지 않게 함
+			go sendTelegramAlert(msg)
+
+			// 3. 웹소켓으로 프론트엔드에 실시간 알림 전송
 			event, _ := json.Marshal(map[string]interface{}{
-				"type": "WHALE_ALERT", "value": newTx.EthValue, "hash": tx.Hash().Hex(),
+				"type": "WHALE_ALERT", "value": newTx.EthValue, "hash": newTx.Hash,
 			})
 			hub.broadcast <- event
 		}
