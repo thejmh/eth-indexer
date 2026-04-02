@@ -214,6 +214,32 @@ func main() {
 		})
 	})
 
+	// [이론: 데이터 집계] UNION ALL과 GROUP BY를 사용하여 활동량 산출
+	r.GET("/api/stats/top-addresses", func(c *gin.Context) {
+		type AddressStat struct {
+			Address string `json:"address"`
+			Count   int    `json:"count"`
+		}
+		var stats []AddressStat
+
+		// 입금/출금 주소를 모두 합쳐서 카운트 (고성능 쿼리)
+		query := `
+			SELECT address, COUNT(*) as count
+			FROM (
+				SELECT from_address as address FROM transactions
+				UNION ALL
+				SELECT to_address as address FROM transactions
+			)
+			WHERE address != 'Contract Creation' -- 컨트랙트 생성 제외
+			GROUP BY address
+			ORDER BY count DESC
+			LIMIT 5
+		`
+
+		db.Raw(query).Scan(&stats)
+		c.JSON(http.StatusOK, stats)
+	})
+
 	r.GET("/api/transactions", func(c *gin.Context) {
 		var txs []Transaction
 		limit := 50
