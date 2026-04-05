@@ -1,5 +1,8 @@
 node_modules/
-*lock.json
 dist/
 coverage/
+*lock.json
+*.db
+*.log
+.env
 docker-compose.yml
